@@ -1,0 +1,219 @@
+const express = require('express');
+const cors = require('cors');
+const sqlite3 = require('sqlite3').verbose(); // verbose para más detalles en errores
+const path = require('path');
+
+const app = express();
+const port = process.env.PORT || 3001; // Puerto para el backend (diferente del frontend)
+
+// --- Middlewares ---
+app.use(cors({
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] // Lista de métodos permitidos
+  }));
+app.use(express.json());
+
+// --- Conexión a la Base de Datos SQLite ---
+const dbPath = path.join(__dirname, 'guilds.db');
+const db = new sqlite3.Database(dbPath, (err) => {
+    if (err) {
+        console.error("Error opening database:", err.message);
+    } else {
+        console.log("Connected to the SQLite database.");
+        // Crear tabla si no existe y añadir datos iniciales
+        db.serialize(() => { // Asegura que las operaciones se ejecuten en orden
+            db.run(`CREATE TABLE IF NOT EXISTS guilds (
+                guild_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                level INTEGER DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )`, (err) => {
+                if (err) {
+                    console.error("Error creating table:", err.message);
+                } else {
+                    console.log("Table 'guilds' checked/created.");
+                    // Insertar datos de ejemplo solo si la tabla está vacía (opcional, pero útil)
+                    const insertSql = "INSERT OR IGNORE INTO guilds (name, level) VALUES (?, ?)";
+                    db.run(insertSql, ["Knights of Valor", 5]);
+                    db.run(insertSql, ["Mystic Weavers", 3]);
+                    db.run(insertSql, ["Iron Legion", 4]);
+                }
+            });
+        });
+    }
+});
+
+// --- Rutas de la API ---
+app.get('/', (req, res) => {
+    res.send('Guild Management Backend (Node/Express) is running!');
+});
+
+// Endpoint para obtener todos los gremios
+app.get('/api/guilds', (req, res) => {
+    const sql = "SELECT guild_id, name, level FROM guilds ORDER BY name";
+    db.all(sql, [], (err, rows) => {
+        if (err) {
+            console.error("Error querying guilds:", err.message);
+            res.status(500).json({ error: "Failed to retrieve guilds", details: err.message });
+            return;
+        }
+        console.log("GET /api/guilds - Returning guilds:", rows.length);
+        res.json(rows); // Envía los resultados como JSON
+    });
+});
+// --- RUTA: Crear un nuevo Gremio ---
+app.post('/api/guilds', (req, res) => {
+    const { name, level } = req.body; // Obtener datos del cuerpo de la solicitud
+
+    // Validación básica
+    if (!name) {
+        return res.status(400).json({ error: "Guild name is required" });
+    }
+
+    const guildLevel = level || 1; // Valor predeterminado si no se proporciona nivel
+
+    const sql = `INSERT INTO guilds (name, level) VALUES (?, ?)`;
+    const params = [name, guildLevel];
+
+    // Usamos function() para poder acceder a 'this' (lastID, changes)
+    db.run(sql, params, function (err) {
+        if (err) {
+            // Manejar error de restricción UNIQUE (nombre duplicado)
+            if (err.message.includes("UNIQUE constraint failed")) {
+                 console.error("Error creating guild (duplicate):", name);
+                 return res.status(409).json({ error: "Guild name already exists", details: err.message }); // 409 Conflict
+            }
+            // Otros errores de base de datos
+            console.error("Error inserting guild:", err.message);
+            return res.status(500).json({ error: "Failed to create guild", details: err.message });
+        }
+        // Éxito: Devolver el gremio recién creado
+        console.log(`POST /api/guilds - Created guild with ID: ${this.lastID}`);
+        res.status(201).json({ // 201 Created
+            guild_id: this.lastID,
+            name: name,
+            level: guildLevel
+        });
+    });
+});
+// --- Fin RUTA ---
+// --- RUTA: Eliminar un Gremio por ID ---
+app.delete('/api/guilds/:id', (req, res) => {
+    const { id } = req.params; // Obtener el ID desde los parámetros de la URL
+
+    // Validar que el ID sea un número (básico)
+    if (isNaN(id)) {
+         return res.status(400).json({ error: "Invalid Guild ID provided." });
+    }
+
+    const guildId = parseInt(id, 10); // Convertir a número
+
+    const sql = `DELETE FROM guilds WHERE guild_id = ?`;
+
+    db.run(sql, guildId, function (err) {
+        if (err) {
+            console.error(`Error deleting guild with ID ${guildId}:`, err.message);
+            return res.status(500).json({ error: "Failed to delete guild", details: err.message });
+        }
+        // 'this.changes' indica cuántas filas fueron afectadas.
+        // Si es 0, el gremio con ese ID no existía.
+        if (this.changes === 0) {
+            console.log(`DELETE /api/guilds/${guildId} - Guild not found.`);
+            return res.status(404).json({ error: `Guild with ID ${guildId} not found.` });
+        }
+
+        console.log(`DELETE /api/guilds/${guildId} - Guild deleted successfully.`);
+        // Éxito: No se necesita devolver contenido, un status 204 es apropiado.
+        // Opcionalmente, puedes devolver un mensaje de éxito en JSON con status 200.
+        // res.status(200).json({ message: `Guild with ID ${guildId} deleted successfully.` });
+        res.status(204).send(); // 204 No Content - estándar para DELETE exitoso
+    });
+});
+// --- Fin RUTA ---
+// --- NUEVA RUTA: Actualizar un Gremio por ID ---
+app.put('/api/guilds/:id', (req, res) => {
+    const { id } = req.params;
+    const { name, level } = req.body; // Obtener nuevos datos del cuerpo
+
+    // Validar ID
+    if (isNaN(id)) {
+        return res.status(400).json({ error: "Invalid Guild ID provided." });
+    }
+    const guildId = parseInt(id, 10);
+
+    // Validar datos recibidos (básico)
+    if (!name || typeof name !== 'string' || name.trim() === '') {
+        return res.status(400).json({ error: "Guild name is required and must be a non-empty string." });
+    }
+     // Nivel es opcional, pero si se da, debe ser número
+    const guildLevel = (level !== undefined && !isNaN(level)) ? parseInt(level, 10) : null;
+    if (level !== undefined && guildLevel === null) {
+         return res.status(400).json({ error: "If provided, level must be a valid number." });
+    }
+     // Si no se proporciona level, podríamos decidir mantener el existente o poner un default.
+     // Por ahora, si no viene, no lo actualizaremos en la consulta SQL.
+
+    // Construir la consulta SQL dinámicamente (¡cuidado con SQL injection si no se usan placeholders!)
+    // Aquí usamos placeholders, que es seguro.
+    let sql;
+    let params;
+
+    if (guildLevel !== null) {
+        // Actualizar nombre y nivel
+        sql = `UPDATE guilds SET name = ?, level = ? WHERE guild_id = ?`;
+        params = [name.trim(), guildLevel, guildId];
+    } else {
+        // Actualizar solo el nombre (si el nivel no se proporcionó o no era válido)
+        sql = `UPDATE guilds SET name = ? WHERE guild_id = ?`;
+        params = [name.trim(), guildId];
+        console.log(`PUT /api/guilds/${guildId} - Updating only name to: ${name.trim()}`);
+    }
+
+
+    db.run(sql, params, function (err) {
+        if (err) {
+             // Manejar error de restricción UNIQUE (nombre duplicado) si aplica al actualizar
+             if (err.message.includes("UNIQUE constraint failed")) {
+                 console.error(`Error updating guild ${guildId} (duplicate name):`, name);
+                 return res.status(409).json({ error: "Guild name already exists", details: err.message }); // 409 Conflict
+             }
+            console.error(`Error updating guild with ID ${guildId}:`, err.message);
+            return res.status(500).json({ error: "Failed to update guild", details: err.message });
+        }
+
+        if (this.changes === 0) {
+            console.log(`PUT /api/guilds/${guildId} - Guild not found.`);
+            return res.status(404).json({ error: `Guild with ID ${guildId} not found.` });
+        }
+
+        console.log(`PUT /api/guilds/${guildId} - Guild updated successfully.`);
+        // Éxito: Devolver el gremio actualizado (consultándolo de nuevo o construyéndolo)
+        // Consultar de nuevo es más robusto para obtener el estado final
+        const selectSql = "SELECT guild_id, name, level FROM guilds WHERE guild_id = ?";
+        db.get(selectSql, [guildId], (selectErr, row) => {
+             if (selectErr) {
+                  console.error(`Error fetching updated guild ${guildId}:`, selectErr.message);
+                  // A pesar del error de lectura, la actualización fue exitosa, devolver 200 OK pero sin el cuerpo actualizado
+                  return res.status(200).json({ message: "Guild updated, but failed to retrieve updated data."});
+             }
+             res.status(200).json(row); // Devolver el gremio actualizado
+        });
+    });
+});
+// --- Fin NUEVA RUTA ---
+
+// --- Iniciar Servidor ---
+app.listen(port, '0.0.0.0', () => { // Escuchar en 0.0.0.0 para accesibilidad en IDX
+    console.log(`Backend server listening at http://localhost:${port}`);
+    console.log(`Accessible within IDX environment.`);
+});
+
+// --- Manejo de Cierre Limpio ---
+process.on('SIGINT', () => {
+    db.close((err) => {
+        if (err) {
+            console.error(err.message);
+        }
+        console.log('Closed the database connection.');
+        process.exit(0);
+    });
+});
